@@ -1,9 +1,9 @@
 <!-- togo-header -->
 <div align="center">
-  <img src=".github/assets/togo-mark.svg" alt="togo" height="64" />
+  <picture><source media="(prefers-color-scheme: dark)" srcset=".github/assets/togo-mark-dark.svg" /><img src=".github/assets/togo-mark.svg" alt="ToGO" height="64" /></picture>
   <h1>togo-framework/orm</h1>
   <p>
-    <a href="https://to-go.dev/marketplace"><img src="https://img.shields.io/badge/marketplace-to--go.dev-1FC7DC" alt="marketplace" /></a>
+    <a href="https://to-go.dev/marketplace"><img src="https://img.shields.io/badge/marketplace-to--go.dev-1F8A99" alt="marketplace" /></a>
     <a href="https://pkg.go.dev/github.com/togo-framework/orm"><img src="https://pkg.go.dev/badge/github.com/togo-framework/orm.svg" alt="pkg.go.dev" /></a>
     <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT" />
   </p>
@@ -18,7 +18,7 @@ togo install togo-framework/orm
 
 <!-- /togo-header -->
 
-<p align="center"><img src=".github/assets/togo-mark.svg" width="96" alt="togo"></p>
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/assets/togo-mark-dark.svg" /><img src=".github/assets/togo-mark.svg" alt="ToGO" width="96" /></picture></p>
 
 # orm
 
