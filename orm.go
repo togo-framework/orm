@@ -9,7 +9,9 @@ package orm
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 	"reflect"
 	"regexp"
@@ -34,6 +36,33 @@ var allowedOps = map[string]bool{
 
 func validIdent(s string) bool { return identRe.MatchString(s) }
 func validOp(op string) bool   { return allowedOps[strings.ToUpper(strings.TrimSpace(op))] }
+
+// ErrInvalidInput marks a database error caused by a value the caller sent: a
+// malformed uuid, number or date the database couldn't convert (SQLSTATE class
+// 22, "data exception"). Handlers map it to 4xx instead of 500:
+//
+//	if errors.Is(err, orm.ErrInvalidInput) { ... }
+//
+// The original driver error is still reachable through errors.As.
+var ErrInvalidInput = errors.New("orm: invalid input value")
+
+type invalidInputError struct{ err error }
+
+func (e *invalidInputError) Error() string   { return e.err.Error() }
+func (e *invalidInputError) Unwrap() []error { return []error{ErrInvalidInput, e.err} }
+
+// classify wraps driver data exceptions in ErrInvalidInput. Drivers that report
+// a SQLSTATE (pgx, lib/pq) expose it through a SQLState() method.
+func classify(err error) error {
+	if err == nil {
+		return nil
+	}
+	var st interface{ SQLState() string }
+	if errors.As(err, &st) && strings.HasPrefix(st.SQLState(), "22") {
+		return &invalidInputError{err}
+	}
+	return err
+}
 
 // Dialect is the kernel's per-driver SQL dialect (re-exported for convenience).
 type Dialect = togo.Dialect
@@ -134,10 +163,11 @@ func (q *Query[T]) Get(ctx context.Context) ([]T, error) {
 	}
 	rows, err := q.db.QueryContext(ctx, sb, args...)
 	if err != nil {
-		return nil, err
+		return nil, classify(err)
 	}
 	defer rows.Close()
-	return scanAll[T](rows)
+	out, err := scanAll[T](rows)
+	return out, classify(err)
 }
 
 // First returns the first matching row, or (nil, nil) if none.
@@ -155,10 +185,21 @@ func (q *Query[T]) Find(ctx context.Context, id any) (*T, error) {
 	return q.Where("id", "=", id).First(ctx)
 }
 
-// Create inserts a row and returns it (RETURNING *).
+// Create inserts a row and returns it. Drivers with INSERT … RETURNING use it;
+// on the others (MySQL) the id is generated here when data has none, the row is
+// inserted, then re-selected by that id.
 func (q *Query[T]) Create(ctx context.Context, data map[string]any) (*T, error) {
 	if q.err != nil {
 		return nil, q.err
+	}
+	if q.d.NoReturning {
+		if _, ok := data["id"]; !ok {
+			id, err := newUUID()
+			if err != nil {
+				return nil, err
+			}
+			data = withID(data, id)
+		}
 	}
 	cols := make([]string, 0, len(data))
 	ph := make([]string, 0, len(data))
@@ -173,17 +214,44 @@ func (q *Query[T]) Create(ctx context.Context, data map[string]any) (*T, error) 
 		args = append(args, v)
 		i++
 	}
-	sb := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING *", q.table, strings.Join(cols, ", "), strings.Join(ph, ", "))
-	rows, err := q.db.QueryContext(ctx, sb, args...)
+	sb := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", q.table, strings.Join(cols, ", "), strings.Join(ph, ", "))
+	if q.d.NoReturning {
+		if _, err := q.db.ExecContext(ctx, sb, args...); err != nil {
+			return nil, classify(err)
+		}
+		return For[T](q.db, q.d, q.table).Find(ctx, data["id"])
+	}
+	rows, err := q.db.QueryContext(ctx, sb+" RETURNING *", args...)
 	if err != nil {
-		return nil, err
+		return nil, classify(err)
 	}
 	defer rows.Close()
 	out, err := scanAll[T](rows)
 	if err != nil || len(out) == 0 {
-		return nil, err
+		return nil, classify(err)
 	}
 	return &out[0], nil
+}
+
+// withID returns a copy of data with "id" set, leaving the caller's map as is.
+func withID(data map[string]any, id string) map[string]any {
+	out := make(map[string]any, len(data)+1)
+	for k, v := range data {
+		out[k] = v
+	}
+	out["id"] = id
+	return out
+}
+
+// newUUID returns a random RFC 4122 version 4 UUID in its 36-character form.
+func newUUID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }
 
 // Update sets columns on matching rows.
@@ -216,7 +284,7 @@ func (q *Query[T]) Update(ctx context.Context, data map[string]any) error {
 		args = append(args, q.args...)
 	}
 	_, err := q.db.ExecContext(ctx, sb, args...)
-	return err
+	return classify(err)
 }
 
 // Delete deletes matching rows.
@@ -226,7 +294,7 @@ func (q *Query[T]) Delete(ctx context.Context) error {
 	}
 	w, args := q.where()
 	_, err := q.db.ExecContext(ctx, "DELETE FROM "+q.table+w, args...)
-	return err
+	return classify(err)
 }
 
 // scanAll scans all rows into []T by matching columns to `db` struct tags.
